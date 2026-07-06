@@ -213,7 +213,14 @@
   const UFO_W = 44, UFO_H = 16, UFO_Y = 28, UFO_SPEED = 140;
   const UFO_BONUS = 1000;
   const SHIELD_COUNT = 4, SHIELD_COLS = 12, SHIELD_ROWS = 6, SHIELD_BLOCK = 6;
-  const UPGRADE_TYPES = ['laser', 'pierce', 'blast', 'multi'];
+  const UPGRADE_TYPES = [
+    'laser','laser','laser',
+    'pierce','pierce','pierce',
+    'blast','blast','blast',
+    'multi','multi','multi',
+    'spread','spread','spread',
+    'life',
+  ];
   const UPGRADE_DURATION = 3.0;
   const UPGRADE_DROP_CHANCE = 0.14;
   const POWERUP_W = 22, POWERUP_H = 22, POWERUP_FALL = 90;
@@ -226,6 +233,11 @@
     pierce: '#4dd0ff',
     blast: '#ff6b3d',
     multi: '#8bff4d',
+    spread: '#ff69ec',
+    life: '#ff4d6d',
+  };
+  const UPGRADE_LETTERS = {
+    laser: 'L', pierce: 'P', blast: 'B', multi: 'M', spread: 'S', life: '+',
   };
   const ALIEN_PALETTES = [
     ['#ff4d4d', '#ff944d', '#ffe14d', '#8bff4d', '#4dd0ff'],
@@ -628,6 +640,14 @@
         state.bullets.push({ x: bx + WINGMAN_OFFSET, y: by, wing: 1 });
         p.cooldown = PLAYER_COOLDOWN;
         playSfx('shoot');
+      } else if (kind === 'spread') {
+        const rad = Math.PI / 6;
+        const s = PLAYER_BULLET_SPEED;
+        state.bullets.push({ x: bx, y: by, vx: 0, vy: -s, spread: true });
+        state.bullets.push({ x: bx, y: by, vx: -Math.sin(rad) * s, vy: -Math.cos(rad) * s, spread: true });
+        state.bullets.push({ x: bx, y: by, vx:  Math.sin(rad) * s, vy: -Math.cos(rad) * s, spread: true });
+        p.cooldown = PLAYER_COOLDOWN;
+        playSfx('shoot');
       } else {
         state.bullets.push({ x: bx, y: by });
         p.cooldown = PLAYER_COOLDOWN;
@@ -635,11 +655,14 @@
       }
     }
 
-    for (const b of state.bullets) b.y -= PLAYER_BULLET_SPEED * dt;
+    for (const b of state.bullets) {
+      if (b.vx !== undefined) { b.x += b.vx * dt; b.y += b.vy * dt; }
+      else b.y -= PLAYER_BULLET_SPEED * dt;
+    }
     for (const b of state.alienBullets) b.y += ALIEN_BULLET_SPEED * dt;
     for (const b of state.bullets) if (hitShield(b) && !b.pierce) b.dead = true;
     for (const b of state.alienBullets) if (hitShield(b)) b.dead = true;
-    state.bullets = state.bullets.filter(b => !b.dead && b.y + BULLET_H > 0);
+    state.bullets = state.bullets.filter(b => !b.dead && b.y + BULLET_H > 0 && b.x + BULLET_W > 0 && b.x < W);
     state.alienBullets = state.alienBullets.filter(b => !b.dead && b.y < H);
 
     if (state.upgrade) {
@@ -656,9 +679,15 @@
         { x: pu.x, y: pu.y, w: POWERUP_W, h: POWERUP_H },
         { x: p.x, y: p.y, w: PLAYER_W, h: PLAYER_H }
       )) {
-        state.upgrade = { type: pu.type, timeLeft: UPGRADE_DURATION };
+        if (pu.type === 'life') {
+          state.lives += 1;
+          state.lifeAward = 1.6;
+          playSfx('extraLife');
+        } else {
+          state.upgrade = { type: pu.type, timeLeft: UPGRADE_DURATION };
+          playSfx('powerup');
+        }
         pu.dead = true;
-        playSfx('powerup');
       }
     }
     state.powerups = state.powerups.filter(pu => !pu.dead && pu.y < H);
@@ -853,7 +882,7 @@
     ctx.font = 'bold 14px "Courier New", monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(pu.type[0].toUpperCase(), pu.x + POWERUP_W / 2, pu.y + POWERUP_H / 2 + 1);
+    ctx.fillText(UPGRADE_LETTERS[pu.type] || '?', pu.x + POWERUP_W / 2, pu.y + POWERUP_H / 2 + 1);
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'left';
   }
@@ -967,12 +996,14 @@
     ctx.fillStyle = '#4dd0ff';
     ctx.fillText('POWER-UPS  (collect the falling icons)', cx, y); y += 32;
     const items = [
-      { k: 'laser',  L: 'L', n: 'Laser',      d: 'Vertical beam — vaporizes anything in its column' },
+      { k: 'laser',  L: 'L', n: 'Laser',      d: 'Vertical beam vaporizes anything in its column' },
       { k: 'pierce', L: 'P', n: 'Pierce',     d: 'Bullets pass through, killing multiple invaders' },
-      { k: 'blast',  L: 'B', n: 'Blast',      d: 'Bullets explode on hit, damaging nearby invaders' },
-      { k: 'multi',  L: 'M', n: 'Multi-ship', d: 'Two wingmen join you and triple your firepower' },
+      { k: 'blast',  L: 'B', n: 'Blast',      d: 'Bullets explode, damaging nearby invaders' },
+      { k: 'multi',  L: 'M', n: 'Multi-ship', d: 'Two wingmen join you and triple firepower' },
+      { k: 'spread', L: 'S', n: 'Spread',     d: 'Fires three bullets — straight and diagonal' },
+      { k: 'life',   L: '+', n: 'Extra Life', d: 'Instant +1 life (rare drop)' },
     ];
-    ctx.font = '16px "Courier New", monospace';
+    ctx.font = '15px "Courier New", monospace';
     for (const it of items) {
       ctx.fillStyle = UPGRADE_COLORS[it.k];
       ctx.fillRect(cx, y - 14, 20, 20);
@@ -984,7 +1015,7 @@
       ctx.fillText(it.n, cx + 32, y);
       ctx.fillStyle = '#0f0';
       ctx.fillText(it.d, cx + 152, y);
-      y += 26;
+      y += 24;
     }
     y += 10;
     ctx.fillStyle = '#ffec6b';
