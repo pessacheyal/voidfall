@@ -41,6 +41,11 @@
   window.addEventListener('keydown', e => {
     keys.add(e.key);
     if (e.key === ' ' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') e.preventDefault();
+    if (state.status === 'title' && e.key === ' ') {
+      state.status = 'playing';
+      state.levelBanner = 1.6;
+      return;
+    }
     if (state.status === 'hit' && state.hitTimer <= 0) {
       if (state.lives > 0) {
         state.status = 'playing';
@@ -69,16 +74,19 @@
   const UFO_W = 44, UFO_H = 16, UFO_Y = 28, UFO_SPEED = 140;
   const UFO_BONUS = 1000;
   const SHIELD_COUNT = 4, SHIELD_COLS = 12, SHIELD_ROWS = 6, SHIELD_BLOCK = 6;
-  const UPGRADE_TYPES = ['laser', 'pierce', 'blast'];
+  const UPGRADE_TYPES = ['laser', 'pierce', 'blast', 'multi'];
   const UPGRADE_DURATION = 3.0;
   const UPGRADE_DROP_CHANCE = 0.14;
   const POWERUP_W = 22, POWERUP_H = 22, POWERUP_FALL = 90;
   const LASER_HALF_W = 5;
   const BLAST_RADIUS = 70;
+  const WINGMAN_OFFSET = PLAYER_W + 6;
+  const EXTRA_LIFE_EVERY = 10000;
   const UPGRADE_COLORS = {
     laser: '#ffec6b',
     pierce: '#4dd0ff',
     blast: '#ff6b3d',
+    multi: '#8bff4d',
   };
   const ALIEN_PALETTES = [
     ['#ff4d4d', '#ff944d', '#ffe14d', '#8bff4d', '#4dd0ff'],
@@ -307,7 +315,7 @@
 
   function reset() {
     state = {
-      status: 'playing',
+      status: 'title',
       player: { x: W / 2 - PLAYER_W / 2, y: H - 50, cooldown: 0 },
       bullets: [],
       alienBullets: [],
@@ -324,12 +332,14 @@
       hitTimer: 0,
       ufo: null,
       ufoTimer: 8 + Math.random() * 10,
-      levelBanner: 1.6,
+      levelBanner: 0,
       animFrame: 0,
       animTimer: 0.5,
       powerups: [],
       upgrade: null,
       laser: null,
+      nextLifeScore: EXTRA_LIFE_EVERY,
+      lifeAward: 0,
     };
   }
 
@@ -436,12 +446,20 @@
 
   function update(dt) {
     updateParticles(dt);
+    if (state.status === 'title') return;
     if (state.status === 'hit') {
       state.hitTimer = Math.max(0, state.hitTimer - dt);
       return;
     }
     if (state.status !== 'playing') return;
     const p = state.player;
+
+    if (state.lifeAward > 0) state.lifeAward = Math.max(0, state.lifeAward - dt);
+    while (state.score >= state.nextLifeScore) {
+      state.lives += 1;
+      state.lifeAward = 1.6;
+      state.nextLifeScore += EXTRA_LIFE_EVERY;
+    }
 
     if (keys.has('ArrowLeft')) p.x -= PLAYER_SPEED * dt;
     if (keys.has('ArrowRight')) p.x += PLAYER_SPEED * dt;
@@ -461,6 +479,11 @@
       } else if (kind === 'blast') {
         state.bullets.push({ x: bx - 2, y: by, blast: true });
         p.cooldown = 0.35;
+      } else if (kind === 'multi') {
+        state.bullets.push({ x: bx, y: by });
+        state.bullets.push({ x: bx - WINGMAN_OFFSET, y: by, wing: -1 });
+        state.bullets.push({ x: bx + WINGMAN_OFFSET, y: by, wing: 1 });
+        p.cooldown = PLAYER_COOLDOWN;
       } else {
         state.bullets.push({ x: bx, y: by });
         p.cooldown = PLAYER_COOLDOWN;
@@ -734,6 +757,16 @@
       ctx.fillRect(W / 2 - barW / 2, 58, barW * (state.upgrade.timeLeft / UPGRADE_DURATION), barH);
       ctx.textAlign = 'left';
     }
+    if (state.lifeAward > 0) {
+      const a = Math.min(1, state.lifeAward / 1.0);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#ffec6b';
+      ctx.font = 'bold 22px "Courier New", monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('+1 LIFE', W - 16, 52);
+      ctx.globalAlpha = 1;
+      ctx.textAlign = 'left';
+    }
   }
 
   function drawCenterMsg() {
@@ -747,14 +780,88 @@
     ctx.textAlign = 'left';
   }
 
+  function drawTitle() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#0f0';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 56px "Courier New", monospace';
+    ctx.fillText('SPACE INVADERS', W / 2, 110);
+
+    ctx.font = '18px "Courier New", monospace';
+    ctx.fillStyle = '#0f0';
+    ctx.fillText('Defend Earth from the descending invaders', W / 2, 150);
+
+    ctx.textAlign = 'left';
+    const cx = W / 2 - 200;
+    let y = 210;
+    ctx.font = 'bold 20px "Courier New", monospace';
+    ctx.fillStyle = '#4dd0ff';
+    ctx.fillText('CONTROLS', cx, y); y += 32;
+    ctx.font = '18px "Courier New", monospace';
+    ctx.fillStyle = '#0f0';
+    ctx.fillText('  ← →   Move ship', cx, y); y += 24;
+    ctx.fillText('  SPACE  Fire', cx, y); y += 24;
+    ctx.fillText('  R      Restart after game over', cx, y); y += 40;
+
+    ctx.font = 'bold 20px "Courier New", monospace';
+    ctx.fillStyle = '#4dd0ff';
+    ctx.fillText('POWER-UPS  (collect the falling icons)', cx, y); y += 32;
+    const items = [
+      { k: 'laser',  L: 'L', n: 'Laser',      d: 'Vertical beam — vaporizes anything in its column' },
+      { k: 'pierce', L: 'P', n: 'Pierce',     d: 'Bullets pass through, killing multiple invaders' },
+      { k: 'blast',  L: 'B', n: 'Blast',      d: 'Bullets explode on hit, damaging nearby invaders' },
+      { k: 'multi',  L: 'M', n: 'Multi-ship', d: 'Two wingmen join you and triple your firepower' },
+    ];
+    ctx.font = '16px "Courier New", monospace';
+    for (const it of items) {
+      ctx.fillStyle = UPGRADE_COLORS[it.k];
+      ctx.fillRect(cx, y - 14, 20, 20);
+      ctx.fillStyle = '#000';
+      ctx.textAlign = 'center';
+      ctx.fillText(it.L, cx + 10, y + 1);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(it.n, cx + 32, y);
+      ctx.fillStyle = '#0f0';
+      ctx.fillText(it.d, cx + 152, y);
+      y += 26;
+    }
+    y += 10;
+    ctx.fillStyle = '#ffec6b';
+    ctx.font = '16px "Courier New", monospace';
+    ctx.fillText('  Bonus:  extra life every 10,000 points', cx, y);
+    y += 22;
+    ctx.fillText('          UFO fly-by is worth 1000', cx, y);
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#0f0';
+    ctx.font = 'bold 24px "Courier New", monospace';
+    const blink = Math.floor(performance.now() / 500) % 2 === 0;
+    if (blink) ctx.fillText('PRESS SPACE TO START', W / 2, H - 40);
+    ctx.textAlign = 'left';
+  }
+
   function render() {
+    if (state.status === 'title') {
+      drawTitle();
+      return;
+    }
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, W, H);
 
     ctx.fillStyle = '#0a0';
     ctx.fillRect(0, H - 20, W, 2);
 
-    if (state.status !== 'hit') drawPlayer(state.player);
+    if (state.status !== 'hit') {
+      drawPlayer(state.player);
+      if (state.upgrade && state.upgrade.type === 'multi') {
+        ctx.globalAlpha = 0.85;
+        drawPlayer({ x: state.player.x - WINGMAN_OFFSET, y: state.player.y });
+        drawPlayer({ x: state.player.x + WINGMAN_OFFSET, y: state.player.y });
+        ctx.globalAlpha = 1;
+      }
+    }
     for (const a of state.aliens) if (a.alive) drawAlien(a);
     drawShields();
     if (state.ufo) drawUfo(state.ufo);
