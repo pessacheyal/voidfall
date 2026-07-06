@@ -29,7 +29,7 @@
 <body>
 <div id="wrap">
   <canvas id="game" width="800" height="600"></canvas>
-  <div id="hint">← → to move &nbsp;·&nbsp; SPACE to shoot &nbsp;·&nbsp; M to mute &nbsp;·&nbsp; R to restart</div>
+  <div id="hint">← → move &nbsp;·&nbsp; SPACE shoot &nbsp;·&nbsp; Z charge &nbsp;·&nbsp; M mute &nbsp;·&nbsp; R restart</div>
 </div>
 <script>
 (() => {
@@ -239,6 +239,15 @@
   const UPGRADE_LETTERS = {
     laser: 'L', pierce: 'P', blast: 'B', multi: 'M', spread: 'S', life: '+',
   };
+  const STAR_LAYERS = [
+    { count: 40, speed: 12, size: 1, color: '#334' },
+    { count: 28, speed: 26, size: 1, color: '#668' },
+    { count: 16, speed: 55, size: 2, color: '#aab' },
+  ];
+  const COMBO_WINDOW = 2.2;
+  const HIGH_SCORE_KEY = 'si_high_score';
+  const BOSS_INTERVAL = 5;
+  const BOSS_W = 120, BOSS_H = 60;
   const ALIEN_PALETTES = [
     ['#ff4d4d', '#ff944d', '#ffe14d', '#8bff4d', '#4dd0ff'],
     ['#c4b5fd', '#a78bfa', '#818cf8', '#60a5fa', '#3b82f6'],
@@ -422,8 +431,40 @@
   ];
 
   let state;
+  let highScore = 0;
+  try { highScore = parseInt(localStorage.getItem(HIGH_SCORE_KEY), 10) || 0; } catch (e) {}
 
-  function initAliens() {
+  function isBossLevel(level) {
+    return level % BOSS_INTERVAL === 0;
+  }
+
+  function initBoss(level) {
+    const bossNum = level / BOSS_INTERVAL;
+    const hp = 40 + (bossNum - 1) * 25;
+    return {
+      x: W / 2 - BOSS_W / 2, y: 60, w: BOSS_W, h: BOSS_H,
+      hp, maxHp: hp,
+      dir: 1,
+      speed: 110 + bossNum * 25,
+      baseY: 60,
+      t: 0,
+      fireTimer: 1.4,
+      hurtFlash: 0,
+    };
+  }
+
+  function initStars() {
+    const stars = [];
+    for (let layer = 0; layer < STAR_LAYERS.length; layer++) {
+      const cfg = STAR_LAYERS[layer];
+      for (let i = 0; i < cfg.count; i++) {
+        stars.push({ x: Math.random() * W, y: Math.random() * H, layer });
+      }
+    }
+    return stars;
+  }
+
+  function initAliens(level) {
     const gridW = ALIEN_COLS * ALIEN_W + (ALIEN_COLS - 1) * ALIEN_GAP_X;
     const startX = (W - gridW) / 2;
     const startY = 60;
@@ -436,8 +477,30 @@
           row: r,
           col: c,
           alive: true,
+          mode: 'grid',
+          hp: 1,
+          special: null,
+          shootTimer: 0,
+          diveTimer: 0,
         });
       }
+    }
+    const wave = Math.max(0, (level || 1) - 1);
+    const counts = {
+      shielded: Math.min(8, wave),
+      shooter:  Math.min(5, Math.max(0, wave - 1)),
+      diver:    Math.min(4, Math.max(0, wave - 2)),
+      splitter: Math.min(3, Math.max(0, wave - 3)),
+    };
+    const specials = [];
+    for (const key in counts) for (let i = 0; i < counts[key]; i++) specials.push(key);
+    const idxs = aliens.map((_, i) => i).sort(() => Math.random() - 0.5);
+    for (let i = 0; i < Math.min(specials.length, idxs.length); i++) {
+      const a = aliens[idxs[i]];
+      a.special = specials[i];
+      if (a.special === 'shielded') a.hp = 2;
+      if (a.special === 'shooter') a.shootTimer = 2 + Math.random() * 3;
+      if (a.special === 'diver') a.diveTimer = 6 + Math.random() * 8;
     }
     return aliens;
   }
@@ -470,7 +533,7 @@
       player: { x: W / 2 - PLAYER_W / 2, y: H - 50, cooldown: 0 },
       bullets: [],
       alienBullets: [],
-      aliens: initAliens(),
+      aliens: initAliens(1),
       shields: initShields(),
       alienDir: 1,
       alienSpeed: 40,
@@ -491,12 +554,27 @@
       laser: null,
       nextLifeScore: EXTRA_LIFE_EVERY,
       lifeAward: 0,
+      stars: initStars(),
+      shake: 0,
+      hitFlash: 0,
+      floaters: [],
+      combo: 1,
+      comboTimer: 0,
+      boss: null,
+      charge: 0,
+      chargeWasHeld: false,
     };
   }
 
   function nextLevel() {
     state.level += 1;
-    state.aliens = initAliens();
+    if (isBossLevel(state.level)) {
+      state.aliens = [];
+      state.boss = initBoss(state.level);
+    } else {
+      state.aliens = initAliens(state.level);
+      state.boss = null;
+    }
     state.shields = initShields();
     state.bullets = [];
     state.alienBullets = [];
@@ -510,6 +588,54 @@
     state.powerups = [];
     state.upgrade = null;
     state.laser = null;
+  }
+
+  function addFloater(text, x, y, color) {
+    state.floaters.push({ text, x, y, life: 0.9, maxLife: 0.9, color });
+  }
+
+  function shake(amount) {
+    if (amount > state.shake) state.shake = amount;
+  }
+
+  function addScore(base, x, y) {
+    const gain = base * state.combo;
+    state.score += gain;
+    if (state.score > highScore) {
+      highScore = state.score;
+      try { localStorage.setItem(HIGH_SCORE_KEY, String(highScore)); } catch (e) {}
+    }
+    addFloater('+' + gain + (state.combo > 1 ? ' x' + state.combo : ''), x, y,
+      state.combo >= 5 ? '#ffec6b' : state.combo >= 2 ? '#8bff4d' : '#fff');
+    state.comboTimer = 0;
+    state.combo = Math.min(10, state.combo + 1);
+  }
+
+  function spawnHitSpark(cx, cy) {
+    for (let i = 0; i < 10; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 40 + Math.random() * 80;
+      state.particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 0.3 + Math.random() * 0.2,
+        maxLife: 0.5,
+        size: 1 + Math.random() * 1.5,
+        color: '#4dd0ff',
+      });
+    }
+  }
+
+  function spawnSplitters(a) {
+    for (const dir of [-1, 1]) {
+      state.aliens.push({
+        x: a.x, y: a.y, row: 0, col: 0,
+        alive: true, mode: 'mini', hp: 1, special: null,
+        vx: dir * 90, vy: 120,
+        shootTimer: 0, diveTimer: 0,
+      });
+    }
   }
 
   function spawnExplosion(cx, cy) {
@@ -595,7 +721,23 @@
     state.particles = state.particles.filter(p => p.life > 0);
   }
 
+  function updateAmbience(dt) {
+    for (const s of state.stars) {
+      s.y += STAR_LAYERS[s.layer].speed * dt;
+      if (s.y > H) { s.y = 0; s.x = Math.random() * W; }
+    }
+    for (const f of state.floaters) { f.y -= 40 * dt; f.life -= dt; }
+    state.floaters = state.floaters.filter(f => f.life > 0);
+    if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 60);
+    if (state.hitFlash > 0) state.hitFlash = Math.max(0, state.hitFlash - dt * 2.5);
+    if (state.combo > 1) {
+      state.comboTimer += dt;
+      if (state.comboTimer > COMBO_WINDOW) state.combo = 1;
+    }
+  }
+
   function update(dt) {
+    updateAmbience(dt);
     updateParticles(dt);
     if (state.status === 'title') return;
     if (state.status === 'hit') {
@@ -618,6 +760,24 @@
     p.x = Math.max(10, Math.min(W - PLAYER_W - 10, p.x));
 
     p.cooldown = Math.max(0, p.cooldown - dt);
+
+    const zHeld = keys.has('z') || keys.has('Z');
+    if (zHeld) {
+      state.charge = Math.min(1, state.charge + dt);
+    } else if (state.chargeWasHeld) {
+      if (state.charge >= 1) {
+        state.bullets.push({
+          x: p.x + PLAYER_W / 2 - 4,
+          y: p.y - 22,
+          vx: 0, vy: -PLAYER_BULLET_SPEED * 0.9,
+          pierce: true, charged: true,
+        });
+        playSfx('laser');
+      }
+      state.charge = 0;
+    }
+    state.chargeWasHeld = zHeld;
+
     if (keys.has(' ') && p.cooldown === 0) {
       const kind = state.upgrade ? state.upgrade.type : 'normal';
       const bx = p.x + PLAYER_W / 2 - BULLET_W / 2;
@@ -659,11 +819,14 @@
       if (b.vx !== undefined) { b.x += b.vx * dt; b.y += b.vy * dt; }
       else b.y -= PLAYER_BULLET_SPEED * dt;
     }
-    for (const b of state.alienBullets) b.y += ALIEN_BULLET_SPEED * dt;
+    for (const b of state.alienBullets) {
+      if (b.vx !== undefined) { b.x += b.vx * dt; b.y += b.vy * dt; }
+      else b.y += ALIEN_BULLET_SPEED * dt;
+    }
     for (const b of state.bullets) if (hitShield(b) && !b.pierce) b.dead = true;
     for (const b of state.alienBullets) if (hitShield(b)) b.dead = true;
     state.bullets = state.bullets.filter(b => !b.dead && b.y + BULLET_H > 0 && b.x + BULLET_W > 0 && b.x < W);
-    state.alienBullets = state.alienBullets.filter(b => !b.dead && b.y < H);
+    state.alienBullets = state.alienBullets.filter(b => !b.dead && b.y < H && b.x + BULLET_W > 0 && b.x < W);
 
     if (state.upgrade) {
       state.upgrade.timeLeft -= dt;
@@ -703,14 +866,14 @@
           if (!a.alive) continue;
           if (a.x < lx + LASER_HALF_W && a.x + ALIEN_W > lx - LASER_HALF_W) {
             a.alive = false;
-            state.score += (ALIEN_ROWS - a.row) * 10;
+            addScore((ALIEN_ROWS - a.row) * 10, a.x + ALIEN_W / 2, a.y);
             spawnExplosion(a.x + ALIEN_W / 2, a.y + ALIEN_H / 2);
           }
         }
         eraseShieldRect(lx - LASER_HALF_W, 0, LASER_HALF_W * 2, p.y);
         if (state.ufo && state.ufo.x < lx + LASER_HALF_W && state.ufo.x + UFO_W > lx - LASER_HALF_W) {
           spawnExplosion(state.ufo.x + UFO_W / 2, state.ufo.y + UFO_H / 2);
-          state.score += UFO_BONUS;
+          addScore(UFO_BONUS, state.ufo.x + UFO_W / 2, state.ufo.y);
           state.ufo = null;
           state.ufoTimer = 12 + Math.random() * 12;
         }
@@ -729,25 +892,59 @@
     }
 
     const alive = state.aliens.filter(a => a.alive);
+    const grid = alive.filter(a => a.mode === 'grid');
     let minX = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const a of alive) {
+    for (const a of grid) {
       if (a.x < minX) minX = a.x;
       if (a.x + ALIEN_W > maxX) maxX = a.x + ALIEN_W;
       if (a.y + ALIEN_H > maxY) maxY = a.y + ALIEN_H;
     }
 
     const totalAliens = ALIEN_COLS * ALIEN_ROWS;
-    const speedBoost = 1 + (totalAliens - alive.length) / totalAliens * 3;
+    const speedBoost = grid.length ? 1 + (totalAliens - grid.length) / totalAliens * 3 : 1;
     const dx = state.alienDir * state.alienSpeed * speedBoost * dt;
     let shouldReverse = false;
     if (state.alienDir > 0 && maxX + dx > W - 10) shouldReverse = true;
     if (state.alienDir < 0 && minX + dx < 10) shouldReverse = true;
 
-    if (shouldReverse) {
+    if (grid.length && shouldReverse) {
       state.alienDir *= -1;
-      for (const a of state.aliens) if (a.alive) a.y += ALIEN_STEP_DOWN;
+      for (const a of state.aliens) if (a.alive && a.mode === 'grid') a.y += ALIEN_STEP_DOWN;
     } else {
-      for (const a of state.aliens) if (a.alive) a.x += dx;
+      for (const a of state.aliens) if (a.alive && a.mode === 'grid') a.x += dx;
+    }
+
+    // Special-alien updates
+    for (const a of state.aliens) {
+      if (!a.alive) continue;
+      if (a.mode === 'grid') {
+        if (a.special === 'diver') {
+          a.diveTimer -= dt;
+          if (a.diveTimer <= 0) {
+            a.mode = 'diving';
+            a.vx = 0;
+            a.vy = 220;
+          }
+        }
+        if (a.special === 'shooter') {
+          a.shootTimer -= dt;
+          if (a.shootTimer <= 0) {
+            state.alienBullets.push({ x: a.x + ALIEN_W / 2 - BULLET_W / 2, y: a.y + ALIEN_H });
+            a.shootTimer = 2 + Math.random() * 3;
+          }
+        }
+      } else if (a.mode === 'diving') {
+        const targetX = state.player.x + PLAYER_W / 2 - ALIEN_W / 2;
+        a.vx = Math.max(-180, Math.min(180, (targetX - a.x) * 2.5));
+        a.vy = 240;
+        a.x += a.vx * dt;
+        a.y += a.vy * dt;
+        if (a.y > H) a.alive = false;
+      } else if (a.mode === 'mini') {
+        a.x += a.vx * dt;
+        a.y += a.vy * dt;
+        if (a.y > H || a.x < -ALIEN_W || a.x > W) a.alive = false;
+      }
     }
 
     for (const a of state.aliens) {
@@ -774,42 +971,83 @@
       const bRect = { x: b.x, y: b.y, w: BULLET_W, h: BULLET_H };
       if (state.ufo && rectsOverlap(bRect, { x: state.ufo.x, y: state.ufo.y, w: UFO_W, h: UFO_H })) {
         spawnExplosion(state.ufo.x + UFO_W / 2, state.ufo.y + UFO_H / 2);
-        state.score += UFO_BONUS;
+        addScore(UFO_BONUS, state.ufo.x + UFO_W / 2, state.ufo.y);
         state.ufo = null;
         state.ufoTimer = 12 + Math.random() * 12;
         if (!b.pierce) b.dead = true;
         playSfx('blast');
+        shake(8);
+        continue;
+      }
+      if (state.boss && rectsOverlap(bRect, { x: state.boss.x, y: state.boss.y, w: state.boss.w, h: state.boss.h })) {
+        const dmg = b.charged ? 6 : (b.blast ? 3 : 1);
+        state.boss.hp -= dmg;
+        state.boss.hurtFlash = 1;
+        spawnHitSpark(b.x + BULLET_W / 2, b.y);
+        if (state.boss.hp <= 0) {
+          const bossNum = state.level / BOSS_INTERVAL;
+          const reward = 5000 * bossNum;
+          addScore(reward, state.boss.x + state.boss.w / 2, state.boss.y + state.boss.h / 2);
+          for (let i = 0; i < 12; i++) {
+            spawnExplosion(state.boss.x + Math.random() * state.boss.w, state.boss.y + Math.random() * state.boss.h);
+          }
+          shake(22);
+          state.hitFlash = 0.6;
+          state.boss = null;
+          playSfx('blast');
+          playSfx('levelup');
+        } else {
+          playSfx('invaderDie');
+        }
+        if (b.blast) { b.dead = true; playSfx('blast'); shake(6); }
+        else if (!b.pierce) b.dead = true;
         continue;
       }
       for (const a of state.aliens) {
         if (!a.alive) continue;
         if (!rectsOverlap(bRect, { x: a.x, y: a.y, w: ALIEN_W, h: ALIEN_H })) continue;
-        a.alive = false;
-        state.score += (ALIEN_ROWS - a.row) * 10;
-        spawnExplosion(a.x + ALIEN_W / 2, a.y + ALIEN_H / 2);
+        a.hp -= b.charged ? 999 : 1;
+        const killed = a.hp <= 0;
+        if (killed) {
+          a.alive = false;
+          const baseScore = a.mode === 'mini' ? 5 : (ALIEN_ROWS - a.row) * 10;
+          const mult = a.special ? 2 : 1;
+          addScore(baseScore * mult, a.x + ALIEN_W / 2, a.y);
+          spawnExplosion(a.x + ALIEN_W / 2, a.y + ALIEN_H / 2);
+          if (a.special === 'splitter') spawnSplitters(a);
+        } else {
+          spawnHitSpark(a.x + ALIEN_W / 2, a.y + ALIEN_H / 2);
+          playSfx('invaderDie');
+        }
 
-        if (b.blast) {
+        if (b.blast && killed) {
           const cx = a.x + ALIEN_W / 2, cy = a.y + ALIEN_H / 2;
           for (const other of state.aliens) {
             if (!other.alive) continue;
             const ox = other.x + ALIEN_W / 2, oy = other.y + ALIEN_H / 2;
-            const dx = ox - cx, dy = oy - cy;
-            if (dx * dx + dy * dy <= BLAST_RADIUS * BLAST_RADIUS) {
+            const ddx = ox - cx, ddy = oy - cy;
+            if (ddx * ddx + ddy * ddy <= BLAST_RADIUS * BLAST_RADIUS) {
+              other.hp -= 999;
               other.alive = false;
-              state.score += (ALIEN_ROWS - other.row) * 10;
+              const bs = other.mode === 'mini' ? 5 : (ALIEN_ROWS - other.row) * 10;
+              addScore(bs * (other.special ? 2 : 1), ox, oy);
               spawnExplosion(ox, oy);
+              if (other.special === 'splitter') spawnSplitters(other);
             }
           }
           b.dead = true;
           playSfx('blast');
+          shake(6);
+        } else if (b.blast && !killed) {
+          b.dead = true;
         } else if (b.pierce) {
-          playSfx('invaderDie');
+          // keep going
         } else {
           b.dead = true;
-          playSfx('invaderDie');
+          if (killed) playSfx('invaderDie');
         }
 
-        if (Math.random() < UPGRADE_DROP_CHANCE) {
+        if (killed && Math.random() < UPGRADE_DROP_CHANCE) {
           const type = UPGRADE_TYPES[Math.floor(Math.random() * UPGRADE_TYPES.length)];
           state.powerups.push({
             x: a.x + ALIEN_W / 2 - POWERUP_W / 2,
@@ -832,13 +1070,76 @@
         state.hitTimer = 1.0;
         state.message = state.lives > 0 ? 'Press any key to continue' : 'GAME OVER';
         playSfx('playerHit');
+        shake(14);
+        state.hitFlash = 1;
+        state.combo = 1;
         break;
       }
     }
     state.alienBullets = state.alienBullets.filter(b => !b.dead);
     if (state.status === 'hit') return;
 
-    if (state.aliens.every(a => !a.alive)) {
+    // Boss update
+    if (state.boss) {
+      const bo = state.boss;
+      bo.t += dt;
+      bo.x += bo.dir * bo.speed * dt;
+      if (bo.x < 10) { bo.x = 10; bo.dir = 1; }
+      if (bo.x + bo.w > W - 10) { bo.x = W - 10 - bo.w; bo.dir = -1; }
+      bo.y = bo.baseY + Math.sin(bo.t * 1.2) * 12;
+      bo.fireTimer -= dt;
+      if (bo.hurtFlash > 0) bo.hurtFlash = Math.max(0, bo.hurtFlash - dt * 4);
+      if (bo.fireTimer <= 0) {
+        const bossNum = state.level / BOSS_INTERVAL;
+        const shots = 3 + Math.min(4, Math.floor(bossNum));
+        for (let i = 0; i < shots; i++) {
+          const angle = (i - (shots - 1) / 2) * 0.22 + Math.PI / 2;
+          const speed = 220;
+          state.alienBullets.push({
+            x: bo.x + bo.w / 2 - BULLET_W / 2,
+            y: bo.y + bo.h,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+          });
+        }
+        bo.fireTimer = 1.4 - Math.min(0.7, bossNum * 0.15);
+      }
+    }
+
+    // Non-grid alien contact with player
+    for (const a of state.aliens) {
+      if (!a.alive || a.mode === 'grid') continue;
+      if (rectsOverlap({ x: a.x, y: a.y, w: ALIEN_W, h: ALIEN_H }, pRect)) {
+        a.alive = false;
+        spawnExplosion(a.x + ALIEN_W / 2, a.y + ALIEN_H / 2);
+        state.lives -= 1;
+        spawnExplosion(p.x + PLAYER_W / 2, p.y + PLAYER_H / 2);
+        state.status = 'hit';
+        state.hitTimer = 1.0;
+        state.message = state.lives > 0 ? 'Press any key to continue' : 'GAME OVER';
+        playSfx('playerHit');
+        shake(14);
+        state.hitFlash = 1;
+        state.combo = 1;
+        break;
+      }
+    }
+    if (state.status === 'hit') return;
+
+    if (state.boss && rectsOverlap({ x: state.boss.x, y: state.boss.y, w: state.boss.w, h: state.boss.h }, pRect)) {
+      state.lives -= 1;
+      spawnExplosion(p.x + PLAYER_W / 2, p.y + PLAYER_H / 2);
+      state.status = 'hit';
+      state.hitTimer = 1.0;
+      state.message = state.lives > 0 ? 'Press any key to continue' : 'GAME OVER';
+      playSfx('playerHit');
+      shake(14);
+      state.hitFlash = 1;
+      state.combo = 1;
+    }
+    if (state.status === 'hit') return;
+
+    if (!state.boss && state.aliens.every(a => !a.alive)) {
       playSfx('levelup');
       nextLevel();
       return;
@@ -867,9 +1168,86 @@
   }
 
   function drawAlien(a) {
+    if (a.mode === 'mini') {
+      ctx.fillStyle = '#a855f7';
+      ctx.fillRect(a.x + 8, a.y + 4, 16, 14);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(a.x + 11, a.y + 8, 3, 3);
+      ctx.fillRect(a.x + 18, a.y + 8, 3, 3);
+      return;
+    }
     const palette = ALIEN_PALETTES[(state.level - 1) % ALIEN_PALETTES.length];
     const sprite = ALIEN_SPRITES[a.row][state.animFrame];
     drawSprite(sprite, a.x, a.y, { '#': palette[a.row] || '#0f0' });
+    if (a.special) {
+      const outlineColors = { shielded: '#4dd0ff', shooter: '#ff9944', diver: '#ff4d4d', splitter: '#a855f7' };
+      const oc = outlineColors[a.special];
+      if (a.special === 'shielded') {
+        const hpFrac = a.hp / 2;
+        ctx.globalAlpha = 0.35 + 0.35 * hpFrac;
+        ctx.fillStyle = oc;
+        ctx.fillRect(a.x - 2, a.y - 2, ALIEN_W + 4, 2);
+        ctx.fillRect(a.x - 2, a.y + ALIEN_H, ALIEN_W + 4, 2);
+        ctx.fillRect(a.x - 2, a.y, 2, ALIEN_H);
+        ctx.fillRect(a.x + ALIEN_W, a.y, 2, ALIEN_H);
+        ctx.globalAlpha = 1;
+      } else if (a.special === 'shooter') {
+        ctx.fillStyle = oc;
+        ctx.fillRect(a.x + ALIEN_W / 2 - 2, a.y - 4, 4, 3);
+      } else if (a.special === 'diver') {
+        ctx.fillStyle = oc;
+        ctx.fillRect(a.x - 1, a.y - 1, ALIEN_W + 2, 1);
+        ctx.fillRect(a.x - 1, a.y + ALIEN_H, ALIEN_W + 2, 1);
+        if (a.mode === 'diving') {
+          ctx.globalAlpha = 0.5;
+          ctx.fillRect(a.x + ALIEN_W / 2 - 4, a.y - 12, 8, 10);
+          ctx.globalAlpha = 1;
+        }
+      } else if (a.special === 'splitter') {
+        const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
+        ctx.globalAlpha = 0.4 + 0.4 * pulse;
+        ctx.fillStyle = oc;
+        ctx.fillRect(a.x - 2, a.y - 2, ALIEN_W + 4, 2);
+        ctx.fillRect(a.x - 2, a.y + ALIEN_H, ALIEN_W + 4, 2);
+        ctx.fillRect(a.x - 2, a.y, 2, ALIEN_H);
+        ctx.fillRect(a.x + ALIEN_W, a.y, 2, ALIEN_H);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function drawBoss(bo) {
+    const flash = bo.hurtFlash > 0;
+    const body = flash ? '#ffffff' : '#ff3ec9';
+    const accent = flash ? '#ffffff' : '#9b1e8a';
+    ctx.fillStyle = body;
+    ctx.fillRect(bo.x, bo.y + 18, bo.w, bo.h - 30);
+    ctx.fillRect(bo.x + 12, bo.y + 8, bo.w - 24, 14);
+    ctx.fillRect(bo.x + 30, bo.y, bo.w - 60, 12);
+    ctx.fillStyle = accent;
+    ctx.fillRect(bo.x + 6, bo.y + 24, 10, 8);
+    ctx.fillRect(bo.x + bo.w - 16, bo.y + 24, 10, 8);
+    ctx.fillRect(bo.x + bo.w / 2 - 20, bo.y + 36, 40, 6);
+    ctx.fillStyle = flash ? '#fff' : '#ffec6b';
+    ctx.fillRect(bo.x + bo.w / 2 - 6, bo.y + 12, 12, 6);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(bo.x + 18, bo.y + 26, 6, 4);
+    ctx.fillRect(bo.x + bo.w - 24, bo.y + 26, 6, 4);
+    ctx.fillRect(bo.x, bo.y + bo.h - 12, 12, 6);
+    ctx.fillRect(bo.x + bo.w - 12, bo.y + bo.h - 12, 12, 6);
+    // HP bar
+    const barW = W - 200, barH = 12;
+    const bx = (W - barW) / 2, by = H - 34;
+    ctx.fillStyle = '#000'; ctx.fillRect(bx - 2, by - 2, barW + 4, barH + 4);
+    ctx.fillStyle = '#333'; ctx.fillRect(bx, by, barW, barH);
+    const frac = Math.max(0, bo.hp / bo.maxHp);
+    const hpColor = frac > 0.5 ? '#4dff88' : frac > 0.25 ? '#ffec6b' : '#ff4d4d';
+    ctx.fillStyle = hpColor; ctx.fillRect(bx, by, barW * frac, barH);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('BOSS  ' + bo.hp + ' / ' + bo.maxHp, W / 2, by + 10);
+    ctx.textAlign = 'left';
   }
 
   function drawPowerup(pu) {
@@ -918,10 +1296,26 @@
     ctx.textAlign = 'left';
     ctx.fillText('SCORE ' + String(state.score).padStart(5, '0'), 16, 26);
     ctx.textAlign = 'center';
-    ctx.fillText('LEVEL ' + state.level, W / 2, 26);
+    ctx.fillStyle = '#ffec6b';
+    ctx.font = '14px "Courier New", monospace';
+    ctx.fillText('HI ' + String(highScore).padStart(5, '0'), W / 2, 14);
+    ctx.fillStyle = '#0f0';
+    ctx.font = '18px "Courier New", monospace';
+    ctx.fillText('LEVEL ' + state.level, W / 2, 30);
     ctx.textAlign = 'right';
     ctx.fillText('LIVES ' + state.lives, W - 16, 26);
     ctx.textAlign = 'left';
+    if (state.combo > 1) {
+      const remaining = Math.max(0, 1 - state.comboTimer / COMBO_WINDOW);
+      ctx.fillStyle = state.combo >= 5 ? '#ffec6b' : '#8bff4d';
+      ctx.font = 'bold 20px "Courier New", monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText('COMBO x' + state.combo, 16, 52);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(16, 58, 120, 3);
+      ctx.fillStyle = state.combo >= 5 ? '#ffec6b' : '#8bff4d';
+      ctx.fillRect(16, 58, 120 * remaining, 3);
+    }
     if (state.upgrade) {
       const c = UPGRADE_COLORS[state.upgrade.type];
       const label = state.upgrade.type.toUpperCase();
@@ -970,31 +1364,38 @@
   function drawTitle() {
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, W, H);
+    drawStars();
     ctx.fillStyle = '#0f0';
     ctx.textAlign = 'center';
     ctx.font = 'bold 56px "Courier New", monospace';
-    ctx.fillText('SPACE INVADERS', W / 2, 110);
+    ctx.fillText('SPACE INVADERS', W / 2, 90);
 
     ctx.font = '18px "Courier New", monospace';
     ctx.fillStyle = '#0f0';
-    ctx.fillText('Defend Earth from the descending invaders', W / 2, 150);
+    ctx.fillText('Defend Earth from the descending invaders', W / 2, 122);
+    if (highScore > 0) {
+      ctx.fillStyle = '#ffec6b';
+      ctx.font = 'bold 18px "Courier New", monospace';
+      ctx.fillText('HIGH SCORE  ' + highScore, W / 2, 150);
+    }
 
     ctx.textAlign = 'left';
-    const cx = W / 2 - 200;
-    let y = 210;
+    const cx = W / 2 - 220;
+    let y = 190;
     ctx.font = 'bold 20px "Courier New", monospace';
     ctx.fillStyle = '#4dd0ff';
-    ctx.fillText('CONTROLS', cx, y); y += 32;
-    ctx.font = '18px "Courier New", monospace';
+    ctx.fillText('CONTROLS', cx, y); y += 28;
+    ctx.font = '16px "Courier New", monospace';
     ctx.fillStyle = '#0f0';
-    ctx.fillText('  ← →   Move ship', cx, y); y += 24;
-    ctx.fillText('  SPACE  Fire', cx, y); y += 24;
-    ctx.fillText('  M      Mute / unmute sound', cx, y); y += 24;
-    ctx.fillText('  R      Restart after game over', cx, y); y += 40;
+    ctx.fillText('  ← →   Move ship', cx, y); y += 22;
+    ctx.fillText('  SPACE  Fire', cx, y); y += 22;
+    ctx.fillText('  Z      Hold to charge, release big shot', cx, y); y += 22;
+    ctx.fillText('  M      Mute / unmute sound', cx, y); y += 22;
+    ctx.fillText('  R      Restart after game over', cx, y); y += 30;
 
     ctx.font = 'bold 20px "Courier New", monospace';
     ctx.fillStyle = '#4dd0ff';
-    ctx.fillText('POWER-UPS  (collect the falling icons)', cx, y); y += 32;
+    ctx.fillText('POWER-UPS  (collect the falling icons)', cx, y); y += 28;
     const items = [
       { k: 'laser',  L: 'L', n: 'Laser',      d: 'Vertical beam vaporizes anything in its column' },
       { k: 'pierce', L: 'P', n: 'Pierce',     d: 'Bullets pass through, killing multiple invaders' },
@@ -1003,7 +1404,7 @@
       { k: 'spread', L: 'S', n: 'Spread',     d: 'Fires three bullets — straight and diagonal' },
       { k: 'life',   L: '+', n: 'Extra Life', d: 'Instant +1 life (rare drop)' },
     ];
-    ctx.font = '15px "Courier New", monospace';
+    ctx.font = '14px "Courier New", monospace';
     for (const it of items) {
       ctx.fillStyle = UPGRADE_COLORS[it.k];
       ctx.fillRect(cx, y - 14, 20, 20);
@@ -1015,20 +1416,39 @@
       ctx.fillText(it.n, cx + 32, y);
       ctx.fillStyle = '#0f0';
       ctx.fillText(it.d, cx + 152, y);
-      y += 24;
+      y += 22;
     }
     y += 10;
     ctx.fillStyle = '#ffec6b';
-    ctx.font = '16px "Courier New", monospace';
-    ctx.fillText('  Bonus:  extra life every 10,000 points', cx, y);
-    y += 22;
-    ctx.fillText('          UFO fly-by is worth 1000', cx, y);
+    ctx.font = '14px "Courier New", monospace';
+    ctx.fillText('  Bonuses: +1 life every 10,000 pts  ·  UFO = 1000  ·  boss every 5th level', cx, y);
 
     ctx.textAlign = 'center';
     ctx.fillStyle = '#0f0';
     ctx.font = 'bold 24px "Courier New", monospace';
     const blink = Math.floor(performance.now() / 500) % 2 === 0;
     if (blink) ctx.fillText('PRESS SPACE TO START', W / 2, H - 40);
+    ctx.textAlign = 'left';
+  }
+
+  function drawStars() {
+    for (const s of state.stars) {
+      const cfg = STAR_LAYERS[s.layer];
+      ctx.fillStyle = cfg.color;
+      ctx.fillRect(s.x, s.y, cfg.size, cfg.size);
+    }
+  }
+
+  function drawFloaters() {
+    ctx.font = 'bold 14px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    for (const f of state.floaters) {
+      const a = Math.min(1, f.life / f.maxLife);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = f.color;
+      ctx.fillText(f.text, f.x, f.y);
+    }
+    ctx.globalAlpha = 1;
     ctx.textAlign = 'left';
   }
 
@@ -1039,6 +1459,13 @@
     }
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, W, H);
+
+    drawStars();
+
+    const sx = state.shake ? (Math.random() * 2 - 1) * state.shake : 0;
+    const sy = state.shake ? (Math.random() * 2 - 1) * state.shake : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
 
     ctx.fillStyle = '#0a0';
     ctx.fillRect(0, H - 20, W, 2);
@@ -1051,8 +1478,24 @@
         drawPlayer({ x: state.player.x + WINGMAN_OFFSET, y: state.player.y });
         ctx.globalAlpha = 1;
       }
+      if (state.charge > 0) {
+        const barW = 44, barH = 4;
+        const bx = state.player.x - 2, by = state.player.y - 10;
+        ctx.fillStyle = '#333';
+        ctx.fillRect(bx, by, barW, barH);
+        ctx.fillStyle = state.charge >= 1 ? '#ffec6b' : '#8bff4d';
+        ctx.fillRect(bx, by, barW * state.charge, barH);
+        if (state.charge >= 1) {
+          const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 90);
+          ctx.globalAlpha = pulse;
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(bx, by, barW, barH);
+          ctx.globalAlpha = 1;
+        }
+      }
     }
     for (const a of state.aliens) if (a.alive) drawAlien(a);
+    if (state.boss) drawBoss(state.boss);
     drawShields();
     if (state.ufo) drawUfo(state.ufo);
 
@@ -1069,7 +1512,12 @@
     }
 
     for (const b of state.bullets) {
-      if (b.blast) {
+      if (b.charged) {
+        ctx.fillStyle = '#ffec6b';
+        ctx.fillRect(b.x - 4, b.y - 4, BULLET_W + 8, BULLET_H + 20);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(b.x - 1, b.y - 1, BULLET_W + 2, BULLET_H + 14);
+      } else if (b.blast) {
         ctx.fillStyle = '#ff6b3d';
         ctx.fillRect(b.x - 2, b.y - 2, BULLET_W + 4, BULLET_H + 4);
         ctx.fillStyle = '#ffec6b';
@@ -1107,6 +1555,14 @@
       if (state.hitTimer <= 0) drawCenterMsg();
     } else if (state.status !== 'playing') {
       drawCenterMsg();
+    }
+    drawFloaters();
+    ctx.restore();
+    if (state.hitFlash > 0) {
+      ctx.globalAlpha = state.hitFlash * 0.6;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
     }
   }
 
