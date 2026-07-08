@@ -180,6 +180,11 @@
     if (e.key === ' ' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') e.preventDefault();
     ensureAudio();
     if (e.key === 'm' || e.key === 'M') { toggleMute(); return; }
+    if (e.shiftKey && (e.key === 'N' || e.key === 'n') && state.status === 'playing') {
+      addFloater('LEVEL SKIP →', W / 2, 120, '#ff69ec');
+      nextLevel();
+      return;
+    }
     if (state.status === 'title' && e.key === ' ') {
       state.status = 'playing';
       state.levelBanner = 1.6;
