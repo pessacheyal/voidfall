@@ -3,10 +3,20 @@
 <head>
 <meta charset="UTF-8">
 <title>Voidfall</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Voidfall">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
 <style>
   html, body {
     margin: 0;
     padding: 0;
+    width: 100%;
     height: 100%;
     background: #000;
     color: #0f0;
@@ -15,15 +25,41 @@
     align-items: center;
     justify-content: center;
     overflow: hidden;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    overscroll-behavior: none;
   }
-  #wrap { text-align: center; }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    text-align: center;
+  }
   canvas {
     background: #000;
-    border: 2px solid #0f0;
     display: block;
     image-rendering: pixelated;
+    width: min(100vw, calc(100vh * 4 / 3));
+    height: min(100vh, calc(100vw * 3 / 4));
+    max-width: 100%;
+    max-height: 100%;
+    touch-action: none;
   }
-  #hint { margin-top: 8px; font-size: 12px; opacity: 0.7; }
+  #hint {
+    display: none;
+    margin-top: 8px;
+    font-size: 12px;
+    opacity: 0.7;
+  }
+  @media (hover: hover) and (min-width: 900px) and (min-height: 700px) {
+    #hint { display: block; }
+    canvas { border: 2px solid #0f0; }
+  }
 </style>
 </head>
 <body>
@@ -36,6 +72,18 @@
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
+
+  const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const MUTE_BTN = { x: W - 56, y: 12, w: 44, h: 44 };
+  const CHARGE_BTN = { x: 16, y: H - 92, w: 80, h: 80 };
+  const RESTART_BTN = { x: W / 2 - 80, y: H / 2 + 50, w: 160, h: 44 };
+
+  function inRect(px, py, r) {
+    return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+  }
+
+  const activeTouches = new Map();
+  let touchMoveX = null;
 
   const audio = { ctx: null, master: null, sfxGain: null, musicGain: null, muted: false, nextNote: 0, noteIdx: 0 };
 
@@ -205,6 +253,79 @@
     if ((e.key === 'r' || e.key === 'R') && (state.status === 'gameover' || state.status === 'won')) reset();
   });
   window.addEventListener('keyup', e => keys.delete(e.key));
+
+  function canvasCoords(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) * (W / rect.width),
+      y: (clientY - rect.top) * (H / rect.height),
+    };
+  }
+
+  function refreshTouchState() {
+    let anyMove = null;
+    let anyCharge = false;
+    for (const info of activeTouches.values()) {
+      if (info.role === 'move') anyMove = info.x;
+      if (info.role === 'charge') anyCharge = true;
+    }
+    if (anyMove !== null) { keys.add(' '); touchMoveX = anyMove; }
+    else { keys.delete(' '); touchMoveX = null; }
+    if (anyCharge) keys.add('z'); else keys.delete('z');
+  }
+
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    ensureAudio();
+    for (const t of e.changedTouches) {
+      const { x, y } = canvasCoords(t.clientX, t.clientY);
+      let role = 'move';
+      if (inRect(x, y, MUTE_BTN)) {
+        toggleMute();
+        role = 'ui';
+      } else if (state.status === 'title') {
+        state.status = 'playing';
+        state.levelBanner = 1.6;
+        role = 'ui';
+      } else if (state.status === 'hit' && state.hitTimer <= 0) {
+        if (state.lives > 0) {
+          state.status = 'playing';
+          state.player.x = W / 2 - PLAYER_W / 2;
+          state.bullets = [];
+          state.alienBullets = [];
+        } else {
+          state.status = 'gameover';
+          state.message = 'GAME OVER';
+        }
+        role = 'ui';
+      } else if ((state.status === 'gameover' || state.status === 'won') && inRect(x, y, RESTART_BTN)) {
+        reset();
+        role = 'ui';
+      } else if (inRect(x, y, CHARGE_BTN)) {
+        role = 'charge';
+      }
+      activeTouches.set(t.identifier, { role, x, y });
+    }
+    refreshTouchState();
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const info = activeTouches.get(t.identifier);
+      if (!info) continue;
+      const { x, y } = canvasCoords(t.clientX, t.clientY);
+      info.x = x; info.y = y;
+    }
+    refreshTouchState();
+  }, { passive: false });
+
+  const endTouches = e => {
+    for (const t of e.changedTouches) activeTouches.delete(t.identifier);
+    refreshTouchState();
+  };
+  canvas.addEventListener('touchend', endTouches);
+  canvas.addEventListener('touchcancel', endTouches);
 
   const PLAYER_W = 40, PLAYER_H = 18, PLAYER_SPEED = 320;
   const BULLET_W = 3, BULLET_H = 12;
@@ -790,6 +911,12 @@
 
     if (keys.has('ArrowLeft')) p.x -= PLAYER_SPEED * dt;
     if (keys.has('ArrowRight')) p.x += PLAYER_SPEED * dt;
+    if (touchMoveX !== null) {
+      const target = touchMoveX - PLAYER_W / 2;
+      const maxStep = PLAYER_SPEED * 1.6 * dt;
+      const diff = target - p.x;
+      p.x += Math.max(-maxStep, Math.min(maxStep, diff));
+    }
     p.x = Math.max(10, Math.min(W - PLAYER_W - 10, p.x));
 
     p.cooldown = Math.max(0, p.cooldown - dt);
@@ -1592,7 +1719,7 @@
     ctx.textAlign = 'center';
     ctx.fillText(state.message, W / 2, H / 2 - 10);
     ctx.font = '18px "Courier New", monospace';
-    const sub = state.status === 'hit' ? '' : 'Press R to restart';
+    const sub = state.status === 'hit' ? '' : (isTouch ? 'Tap the button to restart' : 'Press R to restart');
     if (sub) ctx.fillText(sub, W / 2, H / 2 + 26);
     ctx.textAlign = 'left';
   }
@@ -1663,7 +1790,7 @@
     ctx.fillStyle = '#0f0';
     ctx.font = 'bold 24px "Courier New", monospace';
     const blink = Math.floor(performance.now() / 500) % 2 === 0;
-    if (blink) ctx.fillText('PRESS SPACE TO START', W / 2, H - 40);
+    if (blink) ctx.fillText(isTouch ? 'TAP TO START' : 'PRESS SPACE TO START', W / 2, H - 40);
     ctx.textAlign = 'left';
   }
 
@@ -1689,9 +1816,68 @@
     ctx.textAlign = 'left';
   }
 
+  function drawTouchUI() {
+    if (!isTouch) return;
+    // Mute button (top-right)
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(MUTE_BTN.x, MUTE_BTN.y, MUTE_BTN.w, MUTE_BTN.h);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = audio.muted ? '#666' : '#0f0';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(MUTE_BTN.x, MUTE_BTN.y, MUTE_BTN.w, MUTE_BTN.h);
+    ctx.fillStyle = audio.muted ? '#666' : '#0f0';
+    ctx.font = 'bold 20px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(audio.muted ? '\u{1f507}' : '\u{1f50a}', MUTE_BTN.x + MUTE_BTN.w / 2, MUTE_BTN.y + MUTE_BTN.h / 2);
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+
+    // Charge button (bottom-left)
+    const ready = state.charge >= 1;
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(CHARGE_BTN.x, CHARGE_BTN.y, CHARGE_BTN.w, CHARGE_BTN.h);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = ready ? '#ffec6b' : '#8bff4d';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(CHARGE_BTN.x, CHARGE_BTN.y, CHARGE_BTN.w, CHARGE_BTN.h);
+    ctx.fillStyle = ready ? '#ffec6b' : '#8bff4d';
+    // Fill portion for charge progress
+    ctx.globalAlpha = 0.4;
+    ctx.fillRect(CHARGE_BTN.x, CHARGE_BTN.y + CHARGE_BTN.h - CHARGE_BTN.h * state.charge, CHARGE_BTN.w, CHARGE_BTN.h * state.charge);
+    ctx.globalAlpha = 1;
+    ctx.font = 'bold 30px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Z', CHARGE_BTN.x + CHARGE_BTN.w / 2, CHARGE_BTN.y + CHARGE_BTN.h / 2);
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+
+    // Restart button on gameover
+    if (state.status === 'gameover' || state.status === 'won') {
+      ctx.globalAlpha = 0.6;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(RESTART_BTN.x, RESTART_BTN.y, RESTART_BTN.w, RESTART_BTN.h);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#0f0';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(RESTART_BTN.x, RESTART_BTN.y, RESTART_BTN.w, RESTART_BTN.h);
+      ctx.fillStyle = '#0f0';
+      ctx.font = 'bold 22px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('TAP TO RESTART', RESTART_BTN.x + RESTART_BTN.w / 2, RESTART_BTN.y + RESTART_BTN.h / 2);
+      ctx.textBaseline = 'alphabetic';
+      ctx.textAlign = 'left';
+    }
+  }
+
   function render() {
     if (state.status === 'title') {
       drawTitle();
+      drawTouchUI();
       return;
     }
     ctx.fillStyle = '#000';
@@ -1806,6 +1992,7 @@
       ctx.fillRect(0, 0, W, H);
       ctx.globalAlpha = 1;
     }
+    drawTouchUI();
   }
 
   let last = performance.now();
