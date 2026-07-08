@@ -240,14 +240,33 @@
     laser: 'L', pierce: 'P', blast: 'B', multi: 'M', spread: 'S', life: '+',
   };
   const STAR_LAYERS = [
-    { count: 40, speed: 12, size: 1, color: '#334' },
-    { count: 28, speed: 26, size: 1, color: '#668' },
-    { count: 16, speed: 55, size: 2, color: '#aab' },
+    { count: 40, speed: 12, size: 1 },
+    { count: 28, speed: 26, size: 1 },
+    { count: 16, speed: 55, size: 2 },
   ];
+  const LEVEL_THEMES = [
+    { name: 'Emerald',  stars: ['#334', '#668', '#aab'], shield: '#4dff88', ground: '#0a0', accent: '#4dd0ff' },
+    { name: 'Crimson',  stars: ['#422', '#844', '#c88'], shield: '#ff9970', ground: '#a30', accent: '#ffec6b' },
+    { name: 'Amethyst', stars: ['#324', '#647', '#a8c'], shield: '#c4b5fd', ground: '#83c', accent: '#ff69ec' },
+    { name: 'Solar',    stars: ['#443', '#886', '#ccb'], shield: '#ffec6b', ground: '#c93', accent: '#8bff4d' },
+    { name: 'Abyss',    stars: ['#233', '#478', '#8bc'], shield: '#4dd0ff', ground: '#08a', accent: '#ff69ec' },
+    { name: 'Inferno',  stars: ['#411', '#833', '#e64'], shield: '#ff6b3d', ground: '#c22', accent: '#ffec6b' },
+  ];
+  function currentTheme() {
+    const idx = (Math.max(1, (state && state.level) || 1) - 1) % LEVEL_THEMES.length;
+    return LEVEL_THEMES[idx];
+  }
   const COMBO_WINDOW = 2.2;
   const HIGH_SCORE_KEY = 'si_high_score';
   const BOSS_INTERVAL = 5;
   const BOSS_W = 120, BOSS_H = 60;
+  const BOSS_TYPES = [
+    { key: 'saucer',   name: 'MOTHERSHIP',      color: '#ff3ec9', accent: '#9b1e8a' },
+    { key: 'crystal',  name: 'CRYSTAL WARLORD', color: '#ff4d4d', accent: '#801515' },
+    { key: 'biotitan', name: 'BIO-TITAN',       color: '#4ade80', accent: '#166534' },
+    { key: 'warp',     name: 'WARP SPHERE',     color: '#a855f7', accent: '#581c87' },
+    { key: 'sun',      name: 'SUN CANNON',      color: '#ffec6b', accent: '#a8770a' },
+  ];
   const ALIEN_PALETTES = [
     ['#ff4d4d', '#ff944d', '#ffe14d', '#8bff4d', '#4dd0ff'],
     ['#c4b5fd', '#a78bfa', '#818cf8', '#60a5fa', '#3b82f6'],
@@ -440,6 +459,8 @@
 
   function initBoss(level) {
     const bossNum = level / BOSS_INTERVAL;
+    const typeIdx = (bossNum - 1) % BOSS_TYPES.length;
+    const t = BOSS_TYPES[typeIdx];
     const hp = 40 + (bossNum - 1) * 25;
     return {
       x: W / 2 - BOSS_W / 2, y: 60, w: BOSS_W, h: BOSS_H,
@@ -450,6 +471,13 @@
       t: 0,
       fireTimer: 1.4,
       hurtFlash: 0,
+      type: t.key,
+      name: t.name,
+      color: t.color,
+      accent: t.accent,
+      warpTimer: 4 + Math.random() * 2,
+      beam: null,
+      spawnTimer: 4,
     };
   }
 
@@ -1083,26 +1111,59 @@
     if (state.boss) {
       const bo = state.boss;
       bo.t += dt;
-      bo.x += bo.dir * bo.speed * dt;
-      if (bo.x < 10) { bo.x = 10; bo.dir = 1; }
-      if (bo.x + bo.w > W - 10) { bo.x = W - 10 - bo.w; bo.dir = -1; }
-      bo.y = bo.baseY + Math.sin(bo.t * 1.2) * 12;
-      bo.fireTimer -= dt;
       if (bo.hurtFlash > 0) bo.hurtFlash = Math.max(0, bo.hurtFlash - dt * 4);
-      if (bo.fireTimer <= 0) {
-        const bossNum = state.level / BOSS_INTERVAL;
-        const shots = 3 + Math.min(4, Math.floor(bossNum));
-        for (let i = 0; i < shots; i++) {
-          const angle = (i - (shots - 1) / 2) * 0.22 + Math.PI / 2;
-          const speed = 220;
-          state.alienBullets.push({
-            x: bo.x + bo.w / 2 - BULLET_W / 2,
-            y: bo.y + bo.h,
-            vx: Math.cos(angle) * speed,
-            vy: Math.sin(angle) * speed,
-          });
+      const bossNum = state.level / BOSS_INTERVAL;
+
+      // Movement
+      if (bo.type === 'warp') {
+        bo.warpTimer -= dt;
+        if (bo.warpTimer <= 0) {
+          spawnExplosion(bo.x + bo.w / 2, bo.y + bo.h / 2);
+          bo.x = 20 + Math.random() * (W - bo.w - 40);
+          bo.warpTimer = 3.5 + Math.random() * 1.5;
+          spawnExplosion(bo.x + bo.w / 2, bo.y + bo.h / 2);
+          playSfx('ufo');
         }
-        bo.fireTimer = 1.4 - Math.min(0.7, bossNum * 0.15);
+        bo.y = bo.baseY + Math.sin(bo.t * 1.5) * 18;
+      } else {
+        bo.x += bo.dir * bo.speed * dt;
+        if (bo.x < 10) { bo.x = 10; bo.dir = 1; }
+        if (bo.x + bo.w > W - 10) { bo.x = W - 10 - bo.w; bo.dir = -1; }
+        bo.y = bo.baseY + Math.sin(bo.t * 1.2) * 12;
+      }
+
+      // Sun-cannon beam damage
+      if (bo.beam) {
+        bo.beam.timeLeft -= dt;
+        if (bo.beam.timeLeft <= 0) {
+          bo.beam = null;
+        } else {
+          const bx = bo.beam.x, halfW = 18;
+          eraseShieldRect(bx - halfW, bo.y + bo.h, halfW * 2, H);
+          const pp = state.player;
+          if (bx - halfW < pp.x + PLAYER_W && bx + halfW > pp.x && state.status === 'playing') {
+            state.lives -= 1;
+            spawnExplosion(pp.x + PLAYER_W / 2, pp.y + PLAYER_H / 2);
+            state.status = 'hit';
+            state.hitTimer = 1.0;
+            state.message = state.lives > 0 ? 'Press any key to continue' : 'GAME OVER';
+            playSfx('playerHit');
+            shake(14);
+            state.hitFlash = 1;
+            state.combo = 1;
+            bo.beam = null;
+          }
+        }
+      }
+
+      bo.fireTimer -= dt;
+      if (bo.fireTimer <= 0 && !bo.beam) {
+        fireBossAttack(bo);
+        if (bo.type === 'saucer')        bo.fireTimer = 1.4 - Math.min(0.7, bossNum * 0.1);
+        else if (bo.type === 'crystal')  bo.fireTimer = 2.2 - Math.min(0.6, bossNum * 0.1);
+        else if (bo.type === 'biotitan') bo.fireTimer = 1.6 - Math.min(0.4, bossNum * 0.1);
+        else if (bo.type === 'warp')     bo.fireTimer = 1.2;
+        else if (bo.type === 'sun')      bo.fireTimer = 3.5;
       }
     }
 
@@ -1216,26 +1277,196 @@
     }
   }
 
+  function fireBossAttack(bo) {
+    const cx = bo.x + bo.w / 2;
+    const cy = bo.y + bo.h;
+    const midY = bo.y + bo.h / 2;
+    const bossNum = state.level / BOSS_INTERVAL;
+    if (bo.type === 'saucer') {
+      const shots = 3 + Math.min(4, Math.floor(bossNum));
+      for (let i = 0; i < shots; i++) {
+        const angle = (i - (shots - 1) / 2) * 0.22 + Math.PI / 2;
+        const speed = 220;
+        state.alienBullets.push({ x: cx - BULLET_W / 2, y: cy, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed });
+      }
+    } else if (bo.type === 'crystal') {
+      const speed = 180;
+      const shots = 8;
+      const phase = (bossNum % 2) * (Math.PI / shots);
+      for (let i = 0; i < shots; i++) {
+        const angle = (i / shots) * Math.PI * 2 + phase;
+        state.alienBullets.push({ x: cx - BULLET_W / 2, y: midY, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed });
+      }
+      playSfx('shootBlast');
+    } else if (bo.type === 'biotitan') {
+      const p = state.player;
+      const angle = Math.atan2((p.y + PLAYER_H / 2) - cy, (p.x + PLAYER_W / 2) - cx);
+      const speed = 280;
+      for (let i = -1; i <= 1; i++) {
+        const a = angle + i * 0.14;
+        state.alienBullets.push({ x: cx - BULLET_W / 2, y: cy, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed });
+      }
+      bo.spawnTimer -= 1;
+      if (bo.spawnTimer <= 0 || Math.random() < 0.4) {
+        bo.spawnTimer = 3;
+        for (const dir of [-1, 1]) {
+          state.aliens.push({
+            x: cx - ALIEN_W / 2, y: cy, row: 0, col: 0, alive: true,
+            mode: 'mini', hp: 1, special: null,
+            vx: dir * 90, vy: 140, shootTimer: 0, diveTimer: 0,
+          });
+        }
+      }
+    } else if (bo.type === 'warp') {
+      const speed = 260;
+      for (let i = -2; i <= 2; i++) {
+        const angle = Math.PI / 2 + i * 0.28;
+        state.alienBullets.push({ x: cx - BULLET_W / 2, y: cy, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed });
+      }
+    } else if (bo.type === 'sun') {
+      bo.beam = { x: cx, timeLeft: 0.9 };
+      playSfx('laser');
+      shake(4);
+    }
+  }
+
   function drawBoss(bo) {
     const flash = bo.hurtFlash > 0;
-    const body = flash ? '#ffffff' : '#ff3ec9';
-    const accent = flash ? '#ffffff' : '#9b1e8a';
-    ctx.fillStyle = body;
-    ctx.fillRect(bo.x, bo.y + 18, bo.w, bo.h - 30);
-    ctx.fillRect(bo.x + 12, bo.y + 8, bo.w - 24, 14);
-    ctx.fillRect(bo.x + 30, bo.y, bo.w - 60, 12);
-    ctx.fillStyle = accent;
-    ctx.fillRect(bo.x + 6, bo.y + 24, 10, 8);
-    ctx.fillRect(bo.x + bo.w - 16, bo.y + 24, 10, 8);
-    ctx.fillRect(bo.x + bo.w / 2 - 20, bo.y + 36, 40, 6);
-    ctx.fillStyle = flash ? '#fff' : '#ffec6b';
-    ctx.fillRect(bo.x + bo.w / 2 - 6, bo.y + 12, 12, 6);
-    ctx.fillStyle = '#000';
-    ctx.fillRect(bo.x + 18, bo.y + 26, 6, 4);
-    ctx.fillRect(bo.x + bo.w - 24, bo.y + 26, 6, 4);
-    ctx.fillRect(bo.x, bo.y + bo.h - 12, 12, 6);
-    ctx.fillRect(bo.x + bo.w - 12, bo.y + bo.h - 12, 12, 6);
-    // HP bar
+    const body = flash ? '#ffffff' : bo.color;
+    const accent = flash ? '#ffffff' : bo.accent;
+    const cx = bo.x + bo.w / 2, cy = bo.y + bo.h / 2;
+
+    if (bo.type === 'saucer') {
+      ctx.fillStyle = body;
+      ctx.fillRect(bo.x, bo.y + 18, bo.w, bo.h - 30);
+      ctx.fillRect(bo.x + 12, bo.y + 8, bo.w - 24, 14);
+      ctx.fillRect(bo.x + 30, bo.y, bo.w - 60, 12);
+      ctx.fillStyle = accent;
+      ctx.fillRect(bo.x + 6, bo.y + 24, 10, 8);
+      ctx.fillRect(bo.x + bo.w - 16, bo.y + 24, 10, 8);
+      ctx.fillRect(bo.x + bo.w / 2 - 20, bo.y + 36, 40, 6);
+      ctx.fillStyle = flash ? '#fff' : '#ffec6b';
+      ctx.fillRect(bo.x + bo.w / 2 - 6, bo.y + 12, 12, 6);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(bo.x + 18, bo.y + 26, 6, 4);
+      ctx.fillRect(bo.x + bo.w - 24, bo.y + 26, 6, 4);
+      ctx.fillRect(bo.x, bo.y + bo.h - 12, 12, 6);
+      ctx.fillRect(bo.x + bo.w - 12, bo.y + bo.h - 12, 12, 6);
+    } else if (bo.type === 'crystal') {
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.moveTo(cx, bo.y);
+      ctx.lineTo(bo.x + bo.w, cy);
+      ctx.lineTo(cx, bo.y + bo.h);
+      ctx.lineTo(bo.x, cy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = accent;
+      ctx.beginPath();
+      ctx.moveTo(cx, bo.y + 10);
+      ctx.lineTo(bo.x + bo.w - 14, cy);
+      ctx.lineTo(cx, bo.y + bo.h - 10);
+      ctx.lineTo(bo.x + 14, cy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(cx - 3, cy - 3, 6, 6);
+      for (let i = 0; i < 4; i++) {
+        const a = bo.t * 2 + i * Math.PI / 2;
+        const r = bo.w * 0.55;
+        const sx = cx + Math.cos(a) * r;
+        const sy = cy + Math.sin(a) * r * 0.45;
+        ctx.fillStyle = flash ? '#fff' : bo.color;
+        ctx.fillRect(sx - 5, sy - 5, 10, 10);
+      }
+    } else if (bo.type === 'biotitan') {
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy - 4, bo.w / 2 - 4, bo.h / 2 - 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = accent;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy - 4, bo.w / 2 - 14, bo.h / 2 - 12, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(cx - 26, cy - 14, 12, 12);
+      ctx.fillRect(cx + 14, cy - 14, 12, 12);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(cx - 22, cy - 10, 5, 5);
+      ctx.fillRect(cx + 18, cy - 10, 5, 5);
+      // tentacles
+      ctx.fillStyle = body;
+      for (let i = 0; i < 6; i++) {
+        const tx = bo.x + 10 + i * (bo.w - 20) / 5;
+        const wobble = Math.sin(bo.t * 4 + i * 0.7) * 3;
+        ctx.fillRect(tx - 3, bo.y + bo.h - 4, 6, 12 + wobble);
+      }
+    } else if (bo.type === 'warp') {
+      const r = Math.min(bo.w, bo.h) * 0.42;
+      const pulse = 0.5 + 0.5 * Math.sin(bo.t * 5);
+      ctx.strokeStyle = body;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r + pulse * 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.7 - pulse * 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = accent;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = flash ? '#fff' : '#ffec6b';
+      ctx.fillRect(cx - 2, cy - 2, 4, 4);
+      // Warp charge indicator
+      if (bo.warpTimer < 0.5) {
+        ctx.globalAlpha = (0.5 - bo.warpTimer) * 2;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r + 12, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    } else if (bo.type === 'sun') {
+      const r = bo.h / 2 - 2;
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = accent;
+      ctx.fillRect(bo.x + 6, cy - 3, bo.w - 12, 6);
+      // superlaser dish
+      ctx.fillStyle = flash ? '#fff' : '#ff6b3d';
+      ctx.beginPath();
+      ctx.arc(cx - r * 0.35, cy - r * 0.35, r * 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      // Charge glow before firing
+      if (bo.fireTimer < 1.0 && !bo.beam) {
+        const glow = 1 - bo.fireTimer;
+        ctx.globalAlpha = glow * 0.4;
+        ctx.fillStyle = '#ffec6b';
+        ctx.beginPath();
+        ctx.arc(cx, cy, r * (1 + glow * 0.4), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      // Active beam
+      if (bo.beam) {
+        const bx = bo.beam.x;
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = '#ffec6b';
+        ctx.fillRect(bx - 26, bo.y + bo.h, 52, H);
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(bx - 16, bo.y + bo.h, 32, H);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // HP bar (shared)
     const barW = W - 200, barH = 12;
     const bx = (W - barW) / 2, by = H - 34;
     ctx.fillStyle = '#000'; ctx.fillRect(bx - 2, by - 2, barW + 4, barH + 4);
@@ -1246,7 +1477,7 @@
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 12px "Courier New", monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('BOSS  ' + bo.hp + ' / ' + bo.maxHp, W / 2, by + 10);
+    ctx.fillText(bo.name + '   ' + Math.max(0, bo.hp) + ' / ' + bo.maxHp, W / 2, by + 10);
     ctx.textAlign = 'left';
   }
 
@@ -1266,7 +1497,7 @@
   }
 
   function drawShields() {
-    ctx.fillStyle = '#4dff88';
+    ctx.fillStyle = currentTheme().shield;
     for (const s of state.shields) {
       for (let r = 0; r < SHIELD_ROWS; r++) {
         for (let c = 0; c < SHIELD_COLS; c++) {
@@ -1432,9 +1663,10 @@
   }
 
   function drawStars() {
+    const theme = currentTheme();
     for (const s of state.stars) {
       const cfg = STAR_LAYERS[s.layer];
-      ctx.fillStyle = cfg.color;
+      ctx.fillStyle = theme.stars[s.layer];
       ctx.fillRect(s.x, s.y, cfg.size, cfg.size);
     }
   }
@@ -1467,7 +1699,7 @@
     ctx.save();
     ctx.translate(sx, sy);
 
-    ctx.fillStyle = '#0a0';
+    ctx.fillStyle = currentTheme().ground;
     ctx.fillRect(0, H - 20, W, 2);
 
     if (state.status !== 'hit') {
@@ -1545,10 +1777,15 @@
 
     drawHUD();
     if (state.levelBanner > 0 && state.status === 'playing') {
-      ctx.fillStyle = '#0f0';
+      const theme = currentTheme();
+      ctx.fillStyle = theme.accent;
       ctx.font = 'bold 42px "Courier New", monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('LEVEL ' + state.level, W / 2, H / 2);
+      const bossHere = isBossLevel(state.level);
+      ctx.fillText((bossHere ? 'BOSS · ' : '') + 'LEVEL ' + state.level, W / 2, H / 2 - 12);
+      ctx.font = '18px "Courier New", monospace';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(theme.name.toUpperCase() + (bossHere ? '  ·  ' + (state.boss && state.boss.name || 'BOSS') : ''), W / 2, H / 2 + 18);
       ctx.textAlign = 'left';
     }
     if (state.status === 'hit') {
